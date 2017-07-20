@@ -27,6 +27,8 @@ import tensorflow as tf
 
 import configuration
 import show_and_tell_model
+from behavior_generator import BehaviorGenerator
+from behavior_discriminator import BehaviorDiscriminator
 from inference_utils import vocabulary, caption_generator
 
 import pdb
@@ -70,101 +72,34 @@ def main(unused_argv):
 	# Build the TensorFlow graph.
 	g = tf.Graph()
 	with g.as_default():
-		# Build the model (teacher-forcing mode).
-		model = show_and_tell_model.ShowAndTellModel(
-				model_config, mode="train", train_inception=FLAGS.train_inception)
-		model.build()
+		# generator part
+		behavior_generator = BehaviorGenerator( model_config, vocab )
+		behavior_generator.build()
+		NLL_loss = behavior_generator.loss
+		global_step = behavior_generator.global_step
 
-		# Build the model (free-running mode).
-		model_free = show_and_tell_model.ShowAndTellModel(
-				model_config, mode="free", train_inception=FLAGS.train_inception, vocab=vocab, reuse=True )
-		model_free.build([model.images,model.input_seqs,model.target_seqs,model.input_mask])
-
-		# Build the model for validation with variable sharing
-		model_valid = show_and_tell_model.ShowAndTellModel(
-				model_config, mode="inference", reuse=True )
-		model_valid.build()
-
-		# get teacher behavior
-		teacher_outputs, [teacher_state_c,teacher_state_h] = model.behavior
-		teacher_state_c = tf.expand_dims( teacher_state_c, axis=1 )
-		teacher_state_h = tf.expand_dims( teacher_state_h, axis=1 )
-
-		# get free behavior
-		free_outputs, [free_state_c,free_state_h] = model_free.behavior
-		free_state_c = tf.expand_dims( free_state_c, axis=1 )
-		free_state_h = tf.expand_dims( free_state_h, axis=1 )
-		
 		# prepare behavior to be LSTM's input
-		teacher_behavior = tf.concat( [teacher_outputs,teacher_state_c,teacher_state_h], axis=1 )
-		free_behavior = tf.concat( [free_outputs,free_state_c,free_state_h], axis=1 )
+		teacher_behavior = behavior_generator.teacher_behavior
+		free_behavior = behavior_generator.free_behavior
+		summary = behavior_generator.summary
 
-		d_lstm_cell = tf.contrib.rnn.BasicLSTMCell(model_config.num_lstm_units)
-		d_lstm_cell = tf.contrib.rnn.DropoutWrapper(
-							d_lstm_cell,
-							input_keep_prob=model_config.lstm_dropout_keep_prob,
-							output_keep_prob=model_config.lstm_dropout_keep_prob)
+		# collect LSTM feature from generator
+		generated_text_feature = free_behavior[:-3]
 
-		with tf.variable_scope("discriminator") as scope_disc:
-			teacher_lengths = tf.reduce_sum( model.input_mask, 1 )+2
-			free_lengths = tf.ones_like(teacher_lengths)*(30+2)
+		# discriminator part
+		discriminator = BehaviorDiscriminator( model_config )
+		discriminator.build( teacher_behavior, free_behavior, behavior_generator.input_mask )
+		d_loss = discriminator.d_loss
+		g_loss = discriminator.g_loss
+		d_accuracy = discriminator.accuracy
 
-			# run lstm
-			d_outputs_teacher, _ = tf.nn.dynamic_rnn( cell=d_lstm_cell,
-												inputs = teacher_behavior,
-												sequence_length = teacher_lengths,
-												dtype = tf.float32,
-												scope = scope_disc )
+		summary.update( discriminator.summary )
 
-			# gather last outputs (deals with variable length of captions)
-			teacher_lengths = tf.expand_dims( teacher_lengths, 1 )
-			batch_range = tf.expand_dims(tf.constant( np.array(range(model_config.batch_size)),dtype=tf.int32 ),1)
-			gather_idx = tf.concat( [batch_range,teacher_lengths-1], axis=1 )
-			d_last_output_teacher = tf.gather_nd( d_outputs_teacher, gather_idx )
+		# text2image part
+		
 
-			# FC to get T/F logits
-			d_logits_teacher = tf.contrib.layers.fully_connected( inputs = d_last_output_teacher,
-															num_outputs = 2,
-															activation_fn = None,
-															weights_initializer = model.initializer,
-															scope = scope_disc )
-			d_accuracy_teacher = tf.reduce_mean( tf.cast( tf.argmax( d_logits_teacher, axis=1 ), tf.float32 ) )
-
-			scope_disc.reuse_variables()
-			d_outputs_free, _ = tf.nn.dynamic_rnn( cell=d_lstm_cell,
-												inputs = free_behavior,
-												sequence_length = free_lengths,
-												dtype = tf.float32,
-												scope = scope_disc )
-			d_last_output_free = d_outputs_free[:,-1,:]
-			d_logits_free = tf.contrib.layers.fully_connected( inputs = d_last_output_free,
-															num_outputs = 2,
-															activation_fn = None,
-															weights_initializer = model.initializer,
-															scope = scope_disc )
-			d_accuracy_free = tf.reduce_mean( tf.cast( 1-tf.argmax( d_logits_free, axis=1 ), tf.float32 ) )
-
-			d_accuracy = ( d_accuracy_teacher + d_accuracy_free ) /2
-
-		d_loss_teacher = tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(name='d_loss_teacher',
-									 logits=d_logits_teacher, labels=tf.ones_like(d_logits_teacher) ) )
-		d_loss_free = tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(name='d_loss_free',
-									 logits=d_logits_free, labels=tf.zeros_like(d_logits_free) ) )
-		d_loss = d_loss_teacher + d_loss_free
-
-		g_loss = tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(name='g_loss',
-									 logits=d_logits_free, labels=tf.ones_like(d_logits_free) ) )
-		g_and_NLL_loss = g_loss + model.total_loss
-
-		summary = {}
-		summary['NLL_loss'] = tf.summary.scalar('NLL_loss', model.total_loss)
-		summary['d_loss'] = tf.summary.scalar('d_loss', d_loss)
-		summary['d_loss_teacher'] = tf.summary.scalar('d_loss_teacher', d_loss_teacher)
-		summary['d_loss_free'] = tf.summary.scalar('d_loss_free', d_loss_free)
-		summary['g_loss'] = tf.summary.scalar('g_loss', g_loss)
-		summary['g_and_NLL_loss'] = tf.summary.scalar('g_and_NLL_loss', g_and_NLL_loss)
-		summary['d_logits_free'] = tf.summary.histogram('d_logits_free', d_logits_free)
-		summary['d_accuracy'] = tf.summary.histogram('d_accuracy', d_accuracy)
+		g_and_NLL_loss = g_loss + NLL_loss
+		summary.update( {'g_and_NLL_loss':tf.summary.scalar('g_loss+NLL_loss',g_and_NLL_loss)} )
 
 		# Set up the learning rate for training ops
 		learning_rate_decay_fn = None
@@ -178,10 +113,10 @@ def main(unused_argv):
 				decay_steps = int(num_batches_per_epoch *
 													training_config.num_epochs_per_decay)
 
-				def _learning_rate_decay_fn(learning_rate, global_step):
+				def _learning_rate_decay_fn(_learning_rate, _global_step):
 					return tf.train.exponential_decay(
-							learning_rate,
-							global_step,
+							_learning_rate,
+							_global_step,
 							decay_steps=decay_steps,
 							decay_rate=training_config.learning_rate_decay_factor,
 							staircase=True)
@@ -189,14 +124,15 @@ def main(unused_argv):
 				learning_rate_decay_fn = _learning_rate_decay_fn
 
 		# Collect trainable variables
-		vars_all = [ v for v in tf.trainable_variables() if v not in model.inception_variables ]
+		vars_all = [ v for v in tf.trainable_variables() \
+								 if v not in behavior_generator.inception_variables ]
 		d_vars = [ v for v in vars_all if 'discr' in v.name ]
 		g_vars = [ v for v in vars_all if 'discr' not in v.name ]
 
 		# Set up the training ops.
 		train_op_NLL = tf.contrib.layers.optimize_loss(
-											loss = model.total_loss,
-											global_step = model.global_step,
+											loss = NLL_loss,
+											global_step = global_step,
 											learning_rate = learning_rate,
 											optimizer = training_config.optimizer,
 											clip_gradients = training_config.clip_gradients,
@@ -206,7 +142,7 @@ def main(unused_argv):
 
 		train_op_disc = tf.contrib.layers.optimize_loss(
 											loss = d_loss,
-											global_step = model.global_step,
+											global_step = global_step,
 											learning_rate = learning_rate,
 											optimizer = training_config.optimizer,
 											clip_gradients = training_config.clip_gradients,
@@ -215,8 +151,8 @@ def main(unused_argv):
 											name='optimize_disc_loss' )
 
 		train_op_gen = tf.contrib.layers.optimize_loss(
-											loss=model.total_loss+g_loss,
-											global_step=model.global_step,
+											loss = g_and_NLL_loss,
+											global_step=global_step,
 											learning_rate=learning_rate,
 											optimizer=training_config.optimizer,
 											clip_gradients=training_config.clip_gradients,
@@ -231,7 +167,7 @@ def main(unused_argv):
 
 		with tf.Session() as sess:
 			# load inception variables
-			model.init_fn( sess )
+			behavior_generator.init_fn( sess )
 			
 			# Set up the training ops
 			nBatches = num_batches_per_epoch
@@ -248,7 +184,6 @@ def main(unused_argv):
 			could_load, checkpoint_counter = load( sess, saver, train_dir )
 			if could_load:
 				counter = checkpoint_counter
-			generator = caption_generator.CaptionGenerator( model_valid, vocab )
 
 			try:
 				# for validation
@@ -258,7 +193,7 @@ def main(unused_argv):
 			
 				# run inference for not-trained model
 				#self.valid( valid_image, f_valid_text )
-				captions = generator.beam_search( sess, image_valid )
+				captions = behavior_generator.generate( sess, image_valid )
 				f_valid_text.write( 'initial caption {}\n'.format( str(datetime.datetime.now().time())[:-7] ) )
 				for i, caption in enumerate(captions):
 					sentence = [vocab.id_to_word(w) for w in caption.sentence[1:-1]]
@@ -282,7 +217,7 @@ def main(unused_argv):
 						is_disc_trained = False
 						is_gen_trained = False
 						if val_NLL_loss> 3.5:
-							_, val_NLL_loss, summary_str = sess.run([train_op_NLL, model.total_loss, summary['NLL_loss']] )
+							_, val_NLL_loss, summary_str = sess.run([train_op_NLL, NLL_loss, summary['NLL_loss']] )
 							summaryWriter.add_summary(summary_str, counter)
 						else:
 							# train discriminator
@@ -300,13 +235,13 @@ def main(unused_argv):
 #							is_gen_trained = True	
 							# val_g_acc is temporarily named variable instead of val_d_acc
 							_, val_g_loss, val_NLL_loss, val_g_acc, smr1, smr2, smr3 = sess.run( 
-								[train_op_gen,g_loss,model.total_loss, d_accuracy, 
+								[train_op_gen,g_loss,NLL_loss, d_accuracy, 
 								summary['g_loss'],summary['NLL_loss'], summary['g_and_NLL_loss']] )
 							summaryWriter.add_summary(smr1, counter)
 							summaryWriter.add_summary(smr2, counter)
 							summaryWriter.add_summary(smr3, counter)
 							_, val_g_loss, val_NLL_loss, val_g_acc, smr1, smr2, smr3 = sess.run( 
-								[train_op_gen,g_loss,model.total_loss, d_accuracy, 
+								[train_op_gen,g_loss,NLL_loss, d_accuracy, 
 								summary['g_loss'],summary['NLL_loss'], summary['g_and_NLL_loss']] )
 							summaryWriter.add_summary(smr1, counter)
 							summaryWriter.add_summary(smr2, counter)
@@ -327,7 +262,7 @@ def main(unused_argv):
 						if (batch_idx+1) % (nBatches//10) == 0  or batch_idx == nBatches-1:
 							# run test after every epoch
 							#self.valid( valid_image, f_valid_text )
-							captions = generator.beam_search( sess, image_valid )
+							captions = behavior_generator.generate_text( sess, image_valid )
 							f_valid_text.write( 'count {} epoch {} batch {}/{} ({})\n'.format( \
 								counter, epoch, batch_idx, nBatches, str(datetime.datetime.now().time())[:-7] ) )
 							for i, caption in enumerate(captions):
