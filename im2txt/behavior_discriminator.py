@@ -93,6 +93,8 @@ class BehaviorDiscriminator(object):
 		summary['d_accuracy_free'] = tf.summary.histogram('d_accuracy_free', accuracy_free)
 
 		self.d_loss = d_loss
+		self.d_loss_teacher = d_loss_teacher
+		self.d_loss_free = d_loss_free
 		self.g_loss = g_loss
 		self.accuracy = accuracy
 		self.accuracy_teacher = accuracy_teacher
