@@ -57,17 +57,19 @@ def main(unused_argv):
 	assert FLAGS.input_file_pattern, "--input_file_pattern is required"
 	assert FLAGS.train_dir, "--train_dir is required"
 
-	model_config = configuration.ModelConfig()
-	model_config.input_file_pattern = FLAGS.input_file_pattern
-	model_config.inception_checkpoint_file = FLAGS.inception_checkpoint_file
-	training_config = configuration.TrainingConfig()
-
 	# Create training directory.
 	train_dir = FLAGS.train_dir
 	filename_saved_model = os.path.join(FLAGS.train_dir,'im2txt')
 	if not tf.gfile.IsDirectory(train_dir):
 		tf.logging.info("Creating training directory: %s", train_dir)
 		tf.gfile.MakeDirs(train_dir)
+
+	save_flags( os.path.join(FLAGS.train_dir,'flags.txt') )
+
+	model_config = configuration.ModelConfig()
+	model_config.input_file_pattern = FLAGS.input_file_pattern
+	model_config.inception_checkpoint_file = FLAGS.inception_checkpoint_file
+	training_config = configuration.TrainingConfig()
 
 	vocab = vocabulary.Vocabulary( FLAGS.vocab_file )
 
@@ -79,6 +81,8 @@ def main(unused_argv):
 		im2txt_generator.build()
 		NLL_loss = im2txt_generator.loss
 		global_step = im2txt_generator.global_step
+		free_sentence = im2txt_generator.free_sentence
+		teacher_sentence = im2txt_generator.teacher_sentence
 
 		# prepare behavior to be LSTM's input
 		teacher_behavior = im2txt_generator.teacher_behavior
@@ -86,7 +90,7 @@ def main(unused_argv):
 		summary = im2txt_generator.summary
 
 		# collect LSTM feature from generator
-		generated_text_feature = free_behavior[:-3]
+#		generated_text_feature = free_behavior[:-3]
 
 		# im2txt discriminator part
 		im2txt_discriminator = BehaviorDiscriminator( model_config )
@@ -110,7 +114,7 @@ def main(unused_argv):
 #		t2i_discriminator.build( real_image, fake_image )
 		
 		g_and_NLL_loss = g_loss + NLL_loss
-		summary.update( {'g_and_NLL_loss':tf.summary.scalar('g_loss+NLL_loss',g_and_NLL_loss)} )
+		summary.update( {'g_and_NLL_loss':tf.summary.scalar('g_and_NLL_loss',g_and_NLL_loss)} )
 
 		# Set up the learning rate for training ops
 		learning_rate_decay_fn = None
@@ -177,16 +181,14 @@ def main(unused_argv):
 		saver = tf.train.Saver(max_to_keep=training_config.max_checkpoints_to_keep)
 
 		with tf.Session() as sess:
+			nBatches = num_batches_per_epoch
+			summaryWriter = tf.summary.FileWriter(train_dir, sess.graph)
 
+			# initialize all variables
 			tf.global_variables_initializer().run()
 
 			# load inception variables
 			im2txt_generator.init_fn( sess )
-			
-			# Set up the training ops
-			nBatches = num_batches_per_epoch
-			
-			summaryWriter = tf.summary.FileWriter(train_dir, sess.graph)
 			
 			# start input enqueue threads
 			coord = tf.train.Coordinator()
@@ -235,7 +237,8 @@ def main(unused_argv):
 						counter += 1
 						is_disc_trained = False
 						is_gen_trained = False
-						_, val_NLL_loss, summary_str = sess.run([train_op_NLL, NLL_loss, summary['NLL_loss']] )
+						_, val_NLL_loss, summary_str, val_free_sentence, val_teacher_sentence = sess.run(
+									[train_op_NLL, NLL_loss, summary['NLL_loss'], free_sentence, teacher_sentence] )
 						summaryWriter.add_summary(summary_str, counter)
 #						if val_NLL_loss> 3.5:
 #							_, val_NLL_loss, summary_str = sess.run([train_op_NLL, NLL_loss, summary['NLL_loss']] )
@@ -285,13 +288,19 @@ def main(unused_argv):
 									sentence = "  {}-{}) {} (p={:.8f})".format(i+1,j+1, sentence, math.exp(caption.logprob))
 									print( sentence )
 									f_valid_text.write( sentence +'\n' )
-#							# free sentence check
-#							for i, caption in enumerate(val_free_sentence):
-#								sentence = [vocab.id_to_word(w) for w in caption[1:-1]]
-#								sentence = " ".join(sentence)
-#								sentence = "  free %d) %s" % (i+1, sentence)
-#								print( sentence )
-#								f_valid_text.write( sentence +'\n' )
+							# free sentence check
+							for i, caption in enumerate(val_free_sentence):
+								if i>9: break
+								sentence = [vocab.id_to_word(w) for w in caption[1:-1]]
+								sentence = " ".join(sentence)
+								sentence = "  free %d) %s" % (i+1, sentence)
+								print( sentence )
+								f_valid_text.write( sentence +'\n' )
+								sentence = [vocab.id_to_word(w) for w in val_teacher_sentence[i,1:]]
+								sentence = " ".join(sentence)
+								sentence = "  teacher %d) %s" % (i+1, sentence)
+								print( sentence )
+								f_valid_text.write( sentence +'\n' )
 							f_valid_text.flush()
 			
 			except tf.errors.OutOfRangeError:
@@ -343,6 +352,11 @@ def log( epoch, batch, nBatches, lossnames, losses, elapsed, counter=None, filel
 		filelogger.write( log )
 	return log
 
+def save_flags( path ):
+    flags_dict = tf.flags.FLAGS.__flags
+    with open(path, 'w') as f:
+        for key,val in flags_dict.iteritems():
+            f.write( '{} = {}\n'.format(key,val) )
 
 if __name__ == "__main__":
 	tf.app.run()

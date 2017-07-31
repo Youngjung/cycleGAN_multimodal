@@ -85,6 +85,8 @@ class BehaviorGenerator(object):
 		self.loss = model_teacher.total_loss
 
 		self.summary = summary
+		self.free_sentence = model_free.free_sentence
+		self.teacher_sentence = model_teacher.input_seqs
 
 		# misc
 		self.inception_variables = model_teacher.inception_variables
