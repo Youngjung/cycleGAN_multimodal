@@ -169,7 +169,7 @@ def main(unused_argv):
 											loss = g_and_NLL_loss,
 											global_step=global_step,
 											learning_rate=learning_rate,
-											optimizer=training_config.optimizer,
+											optimizer='Adam',
 											clip_gradients=training_config.clip_gradients,
 											learning_rate_decay_fn=learning_rate_decay_fn,
 											variables = g_vars,
@@ -232,40 +232,42 @@ def main(unused_argv):
 				val_d_loss = float('Inf')
 				val_d_acc = 0
 				val_g_acc = 0
+				b_G_pretrain_done = False
 				for epoch in range(FLAGS.number_of_steps):
 					for batch_idx in range(nBatches):
 						counter += 1
 						is_disc_trained = False
 						is_gen_trained = False
-						_, val_NLL_loss, summary_str, val_free_sentence, val_teacher_sentence = sess.run(
+#						if True:
+						if not b_G_pretrain_done and val_NLL_loss> 3.5:
+							_, val_NLL_loss, summary_str, val_free_sentence, val_teacher_sentence = sess.run(
 									[train_op_NLL, NLL_loss, summary['NLL_loss'], free_sentence, teacher_sentence] )
-						summaryWriter.add_summary(summary_str, counter)
-#						if val_NLL_loss> 3.5:
-#							_, val_NLL_loss, summary_str = sess.run([train_op_NLL, NLL_loss, summary['NLL_loss']] )
-#							summaryWriter.add_summary(summary_str, counter)
-#						else:
-#							# train discriminator
-#							_, val_d_loss, val_d_acc, \
-#							smr1, smr2, smr3, smr4 = sess.run([train_op_disc, d_loss, d_accuracy, 
-#								 summary['d_loss_teacher'], summary['d_loss_free'], summary['d_loss'],summary['d_accuracy']] )
-#							summaryWriter.add_summary(smr1, counter)
-#							summaryWriter.add_summary(smr2, counter)
-#							summaryWriter.add_summary(smr3, counter)
-#							summaryWriter.add_summary(smr4, counter)
-#							# train generator
-#							# val_g_acc is temporarily named variable instead of val_d_acc
-#							_, val_g_loss, val_NLL_loss, val_g_acc, smr1, smr2, smr3 = sess.run( 
-#								[train_op_gen,g_loss,NLL_loss, d_accuracy, 
-#								summary['g_loss'],summary['NLL_loss'], summary['g_and_NLL_loss']] )
-#							summaryWriter.add_summary(smr1, counter)
-#							summaryWriter.add_summary(smr2, counter)
-#							summaryWriter.add_summary(smr3, counter)
-#							_, val_g_loss, val_NLL_loss, val_g_acc, smr1, smr2, smr3 = sess.run( 
-#								[train_op_gen,g_loss,NLL_loss, d_accuracy, 
-#								summary['g_loss'],summary['NLL_loss'], summary['g_and_NLL_loss']] )
-#							summaryWriter.add_summary(smr1, counter)
-#							summaryWriter.add_summary(smr2, counter)
-#							summaryWriter.add_summary(smr3, counter)
+							summaryWriter.add_summary(summary_str, counter)
+						else:
+							b_G_pretrain_done = True
+
+							# train discriminator
+							_, val_d_loss, val_d_acc, \
+							smr1, smr2, smr3, smr4 = sess.run([train_op_disc, d_loss, d_accuracy, 
+								 summary['d_loss_teacher'], summary['d_loss_free'], summary['d_loss'],summary['d_accuracy']] )
+							summaryWriter.add_summary(smr1, counter)
+							summaryWriter.add_summary(smr2, counter)
+							summaryWriter.add_summary(smr3, counter)
+							summaryWriter.add_summary(smr4, counter)
+							# train generator
+							# val_g_acc is temporarily named variable instead of val_d_acc
+							_, val_g_loss, val_NLL_loss, val_g_acc, smr1, smr2, smr3 = sess.run( 
+								[train_op_gen,g_loss,NLL_loss, d_accuracy, 
+								summary['g_loss'],summary['NLL_loss'], summary['g_and_NLL_loss']] )
+							summaryWriter.add_summary(smr1, counter)
+							summaryWriter.add_summary(smr2, counter)
+							summaryWriter.add_summary(smr3, counter)
+							_, val_g_loss, val_NLL_loss, val_g_acc, smr1, smr2, smr3 = sess.run( 
+								[train_op_gen,g_loss,NLL_loss, d_accuracy, 
+								summary['g_loss'],summary['NLL_loss'], summary['g_and_NLL_loss']] )
+							summaryWriter.add_summary(smr1, counter)
+							summaryWriter.add_summary(smr2, counter)
+							summaryWriter.add_summary(smr3, counter)
 			
 						if counter % FLAGS.log_every_n_steps==0:
 							elapsed = time.time() - start_time
