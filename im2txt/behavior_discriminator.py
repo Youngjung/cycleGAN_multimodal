@@ -71,7 +71,7 @@ class BehaviorDiscriminator(object):
 									 logits=logits_teacher, labels=tf.ones_like(logits_teacher) ) )
 		d_loss_free = tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(name='loss_free',
 									 logits=logits_free, labels=tf.zeros_like(logits_free) ) )
-		d_loss = d_loss_teacher + d_loss_free
+		d_loss = 0.9*d_loss_teacher + d_loss_free
 
 		g_loss = tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(name='g_loss',
 									 logits=logits_free, labels=tf.ones_like(logits_free) ) )
