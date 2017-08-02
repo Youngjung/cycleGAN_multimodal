@@ -148,37 +148,12 @@ class ShowAndTellModel(object):
 			target_seqs = None
 			input_mask = None
 		else:
-			# Prefetch serialized SequenceExample protos.
-			# inputs for teacher and free-run are same
-			input_queue = input_ops.prefetch_input_data(
-					self.reader,
-					self.config.input_file_pattern,
-					is_training=self.is_training(),
-					batch_size=self.config.batch_size,
-					values_per_shard=self.config.values_per_input_shard,
-					input_queue_capacity_factor=self.config.input_queue_capacity_factor,
-					num_reader_threads=self.config.num_input_reader_threads)
-
-			# Image processing and random distortion. Split across multiple threads
-			# with each thread applying a slightly different distortion.
-			assert self.config.num_preprocess_threads % 2 == 0
-			images_and_captions = []
-			for thread_id in range(self.config.num_preprocess_threads):
-				serialized_sequence_example = input_queue.dequeue()
-				encoded_image, caption = input_ops.parse_sequence_example(
-						serialized_sequence_example,
-						image_feature=self.config.image_feature_name,
-						caption_feature=self.config.caption_feature_name)
-				image = self.process_image(encoded_image, thread_id=thread_id)
-				images_and_captions.append([image, caption])
-
-			# Batch inputs.
-			queue_capacity = (2 * self.config.num_preprocess_threads *
-												self.config.batch_size)
-			images, input_seqs, target_seqs, input_mask = (
-					input_ops.batch_with_dynamic_pad(images_and_captions,
-															 batch_size=self.config.batch_size,
-															 queue_capacity=queue_capacity))
+			config = self.config
+			images = tf.placeholder(dtype=tf.float32,
+						shape=[config.batch_size,config.image_height,config.image_width,3])
+			input_seqs = tf.placeholder(dtype=tf.int64, shape=[config.batch_size,None])
+			target_seqs = tf.placeholder(dtype=tf.int64, shape=[config.batch_size,None])
+			input_mask = tf.placeholder(dtype=tf.int64, shape=[config.batch_size,None])
 
 		self.images = images
 		self.input_seqs = input_seqs
@@ -256,11 +231,11 @@ class ShowAndTellModel(object):
 		# modified LSTM in the "Show and Tell" paper has no biases and outputs
 		# new_c * sigmoid(o).
 		lstm_cell = tf.contrib.rnn.BasicLSTMCell(self.config.num_lstm_units)
-		if self.mode == "train" or self.mode == 'free':
-			lstm_cell = tf.contrib.rnn.DropoutWrapper(
-					lstm_cell,
-					input_keep_prob=self.config.lstm_dropout_keep_prob,
-					output_keep_prob=self.config.lstm_dropout_keep_prob)
+#		if self.mode == "train" or self.mode == 'free':
+#			lstm_cell = tf.contrib.rnn.DropoutWrapper(
+#					lstm_cell,
+#					input_keep_prob=self.config.lstm_dropout_keep_prob,
+#					output_keep_prob=self.config.lstm_dropout_keep_prob)
 
 		# Feed the image embeddings to set the initial LSTM state.
 		zero_state = lstm_cell.zero_state(
@@ -335,8 +310,20 @@ class ShowAndTellModel(object):
 		if self.mode == "inference":
 			self.inference_softmax = tf.nn.softmax(logits, name="softmax")
 		elif self.mode == "free":
+			self.lstm_outputs = lstm_outputs
+			self.lstm_final_state = lstm_final_state
 			self.behavior = [lstm_outputs, lstm_final_state]
 			self.free_sentence = free_sentence
+			# Compute losses.
+			targets = tf.reshape(self.target_seqs, [-1])
+			weights = tf.to_float(tf.reshape(self.input_mask, [-1]))
+			losses = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=targets,logits=logits)
+			batch_loss = tf.div(tf.reduce_sum(tf.multiply(losses, weights)),
+													tf.reduce_sum(weights),
+													name="batch_loss")
+			tf.losses.add_loss(batch_loss)
+			total_loss = tf.losses.get_total_loss()
+			self.total_loss = total_loss
 		else:
 			targets = tf.reshape(self.target_seqs, [-1])
 			weights = tf.to_float(tf.reshape(self.input_mask, [-1]))
@@ -359,6 +346,8 @@ class ShowAndTellModel(object):
 			self.target_cross_entropy_losses = losses	# Used in evaluation.
 			self.target_cross_entropy_loss_weights = weights	# Used in evaluation.
 			self.behavior = [lstm_outputs, lstm_final_state]
+			self.lstm_outputs = lstm_outputs
+			self.lstm_final_state = lstm_final_state
 
 	def setup_inception_initializer(self):
 		"""Sets up the function to restore inception variables from checkpoint."""
@@ -412,7 +401,7 @@ class ShowAndTellModel(object):
 
 	def feed_image(self, sess, encoded_image):
 		initial_state = sess.run(fetches=self.inference_initial_state,
-														 feed_dict={"image_feed:0": encoded_image})
+										 feed_dict={"image_feed:0": encoded_image})
 		return initial_state
 
 	def inference_step(self, sess, input_feed, state_feed):

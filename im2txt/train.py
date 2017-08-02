@@ -33,6 +33,8 @@ from behavior_discriminator import BehaviorDiscriminator
 #from text2image_discriminator import Text2ImageDiscriminator
 from inference_utils import vocabulary, caption_generator
 
+from ops.inputs_separate import MSCOCORunner
+
 import pdb
 
 FLAGS = tf.app.flags.FLAGS
@@ -51,6 +53,7 @@ tf.flags.DEFINE_integer("log_every_n_steps", 1,
 tf.flags.DEFINE_string("vocab_file", "", "")
 
 tf.logging.set_verbosity(tf.logging.INFO)
+
 
 
 def main(unused_argv):
@@ -76,6 +79,8 @@ def main(unused_argv):
 	# Build the TensorFlow graph.
 	g = tf.Graph()
 	with g.as_default():
+		summary = {}
+
 		# im2txt generator part
 		im2txt_generator = BehaviorGenerator( model_config, vocab )
 		im2txt_generator.build()
@@ -87,7 +92,13 @@ def main(unused_argv):
 		# prepare behavior to be LSTM's input
 		teacher_behavior = im2txt_generator.teacher_behavior
 		free_behavior = im2txt_generator.free_behavior
-		summary = im2txt_generator.summary
+		summary['NLL_loss'] = tf.summary.scalar('NLL_loss', im2txt_generator.loss)
+
+		# temporal debugging variables
+		free_lstm_outputs = im2txt_generator.free_lstm_outputs
+		free_lstm_final_state = im2txt_generator.free_lstm_final_state
+		teacher_lstm_outputs = im2txt_generator.teacher_lstm_outputs
+		teacher_lstm_final_state = im2txt_generator.teacher_lstm_final_state
 
 		# collect LSTM feature from generator
 #		generated_text_feature = free_behavior[:-3]
@@ -96,10 +107,11 @@ def main(unused_argv):
 		im2txt_discriminator = BehaviorDiscriminator( model_config )
 		im2txt_discriminator.build( teacher_behavior, free_behavior, im2txt_generator.input_mask )
 		d_loss = im2txt_discriminator.d_loss
+		d_loss_teacher = im2txt_discriminator.d_loss_teacher
+		d_loss_free = im2txt_discriminator.d_loss_free
 		g_loss = im2txt_discriminator.g_loss
 		d_accuracy = im2txt_discriminator.accuracy
-
-		summary.update( im2txt_discriminator.summary )
+		summary['d_merged'] = im2txt_discriminator.summary_merged
 
 #		# text2image generator part
 #		t2i_generator = Text2ImageGenerator()
@@ -114,7 +126,8 @@ def main(unused_argv):
 #		t2i_discriminator.build( real_image, fake_image )
 		
 		g_and_NLL_loss = g_loss + NLL_loss
-		summary.update( {'g_and_NLL_loss':tf.summary.scalar('g_and_NLL_loss',g_and_NLL_loss)} )
+		summary['g_and_NLL_loss'] = tf.summary.scalar('g_and_NLL_loss',g_and_NLL_loss)
+		summary['all'] = tf.summary.merge_all()
 
 		# Set up the learning rate for training ops
 		learning_rate_decay_fn = None
@@ -155,8 +168,18 @@ def main(unused_argv):
 											variables = g_vars,
 											name='optimize_NLL_loss' )
 
-		train_op_disc = tf.contrib.layers.optimize_loss(
-											loss = d_loss,
+		train_op_disc_teacher = tf.contrib.layers.optimize_loss(
+											loss = d_loss_teacher,
+											global_step = global_step,
+											learning_rate = learning_rate,
+											optimizer = training_config.optimizer,
+											clip_gradients = training_config.clip_gradients,
+											learning_rate_decay_fn = learning_rate_decay_fn,
+											variables = d_vars,
+											name='optimize_disc_loss' )
+
+		train_op_disc_free = tf.contrib.layers.optimize_loss(
+											loss = d_loss_free,
 											global_step = global_step,
 											learning_rate = learning_rate,
 											optimizer = training_config.optimizer,
@@ -191,9 +214,12 @@ def main(unused_argv):
 			im2txt_generator.init_fn( sess )
 			
 			# start input enqueue threads
+			with tf.device("/cpu:0"):
+				coco_runner = MSCOCORunner( model_config, is_training=True )
+				t_images, t_input_seqs, t_target_seqs, t_input_mask = coco_runner.get_inputs()
 			coord = tf.train.Coordinator()
 			threads = tf.train.start_queue_runners(sess=sess, coord=coord)
-			
+						
 			counter = 0
 			start_time = time.time()
 			could_load, checkpoint_counter = load( sess, saver, train_dir )
@@ -214,16 +240,16 @@ def main(unused_argv):
 
 			
 				# run inference for not-trained model
-				for i, valid_image in enumerate(valid_images):
-					captions = im2txt_generator.sampler.beam_search( sess, valid_image )
-					f_valid_text.write( 'initial caption (beam) {}\n'.format( str(datetime.datetime.now().time())[:-7] ) )
-					for j, caption in enumerate(captions):
-						sentence = [vocab.id_to_word(w) for w in caption.sentence[1:-1]]
-						sentence = " ".join(sentence)
-						sentence = "  {}-{}) {} (p={:.8f})".format(i+1,j+1, sentence, math.exp(caption.logprob))
-						print( sentence )
-						f_valid_text.write( sentence +'\n' )
-				f_valid_text.flush()
+#				f_valid_text.write( 'initial caption (beam) {}\n'.format( str(datetime.datetime.now().time())[:-7] ) )
+#				for i, valid_image in enumerate(valid_images):
+#					captions = im2txt_generator.sampler.beam_search( sess, valid_image )
+#					for j, caption in enumerate(captions):
+#						sentence = [vocab.id_to_word(w) for w in caption.sentence[1:-1]]
+#						sentence = " ".join(sentence)
+#						sentence = "  {}-{}) {} (p={:.8f})".format(i+1,j+1, sentence, math.exp(caption.logprob))
+#						print( sentence )
+#						f_valid_text.write( sentence +'\n' )
+#				f_valid_text.flush()
 
 				# run training loop
 				lossnames_to_print = ['NLL_loss','g_loss', 'd_loss', 'd_acc', 'g_acc']
@@ -236,38 +262,46 @@ def main(unused_argv):
 				for epoch in range(FLAGS.number_of_steps):
 					for batch_idx in range(nBatches):
 						counter += 1
-						is_disc_trained = False
-						is_gen_trained = False
+						images, input_seqs, target_seqs, input_mask = sess.run( 
+							[t_images, t_input_seqs, t_target_seqs, t_input_mask] )
+						generator_feed_dict = { im2txt_generator.images:images,
+												im2txt_generator.input_seqs:input_seqs,
+												im2txt_generator.target_seqs:target_seqs,
+												im2txt_generator.input_mask:input_mask } 
+
+
 #						if True:
-						if not b_G_pretrain_done and val_NLL_loss> 3.5:
+						if not b_G_pretrain_done and val_NLL_loss> 3:
 							_, val_NLL_loss, summary_str, val_free_sentence, val_teacher_sentence = sess.run(
-									[train_op_NLL, NLL_loss, summary['NLL_loss'], free_sentence, teacher_sentence] )
+									[train_op_NLL, NLL_loss, summary['NLL_loss'], free_sentence, teacher_sentence],
+									feed_dict=generator_feed_dict )
 							summaryWriter.add_summary(summary_str, counter)
 						else:
 							b_G_pretrain_done = True
 
 							# train discriminator
-							_, val_d_loss, val_d_acc, \
-							smr1, smr2, smr3, smr4 = sess.run([train_op_disc, d_loss, d_accuracy, 
-								 summary['d_loss_teacher'], summary['d_loss_free'], summary['d_loss'],summary['d_accuracy']] )
-							summaryWriter.add_summary(smr1, counter)
-							summaryWriter.add_summary(smr2, counter)
-							summaryWriter.add_summary(smr3, counter)
-							summaryWriter.add_summary(smr4, counter)
+							_, val_d_loss, val_d_acc, summary_str, val_teacher_behavior, val_free_behavior, \
+							val_free_lstm_outputs, val_free_lstm_final_state, val_teacher_lstm_outputs, val_teacher_lstm_final_state \
+							= sess.run([train_op_disc_teacher, d_loss, d_accuracy, summary['d_merged'], teacher_behavior, free_behavior,
+							free_lstm_outputs, free_lstm_final_state, teacher_lstm_outputs, teacher_lstm_final_state],
+									feed_dict=generator_feed_dict )
+							pdb.set_trace()
+							summaryWriter.add_summary(summary_str, counter)
+							_, val_d_loss, val_d_acc, summary_str \
+							= sess.run([train_op_disc_free, d_loss, d_accuracy, summary['d_merged']],
+									feed_dict=generator_feed_dict )
+							summaryWriter.add_summary(summary_str, counter)
+
 							# train generator
 							# val_g_acc is temporarily named variable instead of val_d_acc
-							_, val_g_loss, val_NLL_loss, val_g_acc, smr1, smr2, smr3 = sess.run( 
-								[train_op_gen,g_loss,NLL_loss, d_accuracy, 
-								summary['g_loss'],summary['NLL_loss'], summary['g_and_NLL_loss']] )
-							summaryWriter.add_summary(smr1, counter)
-							summaryWriter.add_summary(smr2, counter)
-							summaryWriter.add_summary(smr3, counter)
-							_, val_g_loss, val_NLL_loss, val_g_acc, smr1, smr2, smr3 = sess.run( 
-								[train_op_gen,g_loss,NLL_loss, d_accuracy, 
-								summary['g_loss'],summary['NLL_loss'], summary['g_and_NLL_loss']] )
-							summaryWriter.add_summary(smr1, counter)
-							summaryWriter.add_summary(smr2, counter)
-							summaryWriter.add_summary(smr3, counter)
+							_, val_g_loss, val_NLL_loss, val_g_acc, summary_str = sess.run( 
+								[train_op_gen,g_loss,NLL_loss, d_accuracy, summary['g_and_NLL_loss']], #summary['all']],
+									feed_dict=generator_feed_dict )
+							summaryWriter.add_summary(summary_str, counter)
+							_, val_g_loss, val_NLL_loss, val_g_acc, summary_str = sess.run( 
+								[train_op_gen,g_loss,NLL_loss, d_accuracy, summary['g_and_NLL_loss']], #summary['all']],
+									feed_dict=generator_feed_dict )
+							summaryWriter.add_summary(summary_str, counter)
 			
 						if counter % FLAGS.log_every_n_steps==0:
 							elapsed = time.time() - start_time
@@ -278,7 +312,7 @@ def main(unused_argv):
 							(epoch==FLAGS.number_of_steps-1 and batch_idx==nBatches-1) :
 							saver.save( sess, filename_saved_model, global_step=counter)
 			
-						if (batch_idx+1) % (nBatches//10) == 0  or batch_idx == nBatches-1:
+						if (batch_idx+1) % (nBatches//50) == 0  or batch_idx == nBatches-1:
 							# run test after every epoch
 							f_valid_text.write( 'count {} epoch {} batch {}/{} ({})\n'.format( \
 									counter, epoch, batch_idx, nBatches, str(datetime.datetime.now().time())[:-7] ) )
