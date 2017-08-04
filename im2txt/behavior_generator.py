@@ -60,38 +60,51 @@ class BehaviorGenerator(object):
 		self.sampler = caption_generator.CaptionGenerator( model_valid, vocab )
 
 		# get teacher behavior
-		teacher_outputs, [teacher_state_c,teacher_state_h] = model_teacher.behavior
-		teacher_state_c = tf.expand_dims( teacher_state_c, axis=1 )
-		teacher_state_h = tf.expand_dims( teacher_state_h, axis=1 )
-		teacher_behavior =tf.concat([teacher_outputs,teacher_state_c,teacher_state_h],axis=1)
+		#teacher_outputs, teacher_state_c,teacher_state_h = model_teacher.behavior
+		#teacher_state_c = tf.expand_dims( teacher_state_c, axis=1 )
+		#teacher_state_h = tf.expand_dims( teacher_state_h, axis=1 )
+		#teacher_behavior =tf.concat([teacher_outputs,teacher_state_c,teacher_state_h],axis=1)
+		teacher_behavior = model_teacher.lstm_outputs
 
 		# get free behavior
-		free_outputs, [free_state_c,free_state_h] = model_free.behavior
-		free_state_c = tf.expand_dims( free_state_c, axis=1 )
-		free_state_h = tf.expand_dims( free_state_h, axis=1 )
-		free_behavior = tf.concat( [free_outputs,free_state_c,free_state_h], axis=1 )
+		#free_outputs, free_state_c,free_state_h = model_free.behavior
+		#free_state_c = tf.expand_dims( free_state_c, axis=1 )
+		#free_state_h = tf.expand_dims( free_state_h, axis=1 )
+		#free_behavior = tf.concat( [free_outputs,free_state_c,free_state_h], axis=1 )
+		free_behavior = model_free.lstm_outputs
 		
-		# summary
-		summary = {}
-		summary['NLL_loss'] = tf.summary.scalar('NLL_loss', model_teacher.total_loss)
+		# set inputs
+		self.images = model_teacher.images
+		self.input_seqs = model_teacher.input_seqs
+		self.target_seqs = model_teacher.target_seqs
+		self.input_mask = model_teacher.input_mask
 
 		# set outputs
 		self.teacher_behavior = teacher_behavior
 		self.free_behavior = free_behavior
-		self.input_mask = model_teacher.input_mask # mask is not an output but required in im2txt discriminator
 		self.input_image = model_teacher.images # image is not an output but required in text2image discriminator
+		self.teacher_lengths = model_teacher.seq_lengths
+		self.free_lengths = model_free.seq_lengths # corresponds to input_mask
 
 		# NLL loss
 		self.loss = model_teacher.total_loss
 
-		self.summary = summary
 		self.free_sentence = model_free.free_sentence
-		self.teacher_sentence = model_teacher.input_seqs
+		self.teacher_GT = model_teacher.input_seqs[:,1:]
+		self.teacher_sentence = model_teacher.seq_output[:,:]
 
 		# misc
 		self.inception_variables = model_teacher.inception_variables
 		self.global_step = model_teacher.global_step
 		self.init_fn = model_teacher.init_fn
+
+		# temporal debugging variables
+		self.free_lstm_outputs = model_free.lstm_outputs
+		self.free_lstm_final_cell = model_free.lstm_final_cell
+		self.free_lstm_final_hidden = model_free.lstm_final_hidden
+		self.teacher_lstm_outputs = model_teacher.lstm_outputs
+		self.teacher_lstm_final_cell = model_teacher.lstm_final_cell
+		self.teacher_lstm_final_hidden = model_teacher.lstm_final_hidden
 
 	def generate_text(self, sess, image_valid):
 		return self.sampler.beam_search( sess, image_valid )
