@@ -227,15 +227,17 @@ class ShowAndTellModel(object):
 			self.target_cross_entropy_losses (training and eval only)
 			self.target_cross_entropy_loss_weights (training and eval only)
 		"""
+		config = self.config
+		batch_size = config.batch_size
 		# This LSTM cell has biases and outputs tanh(new_c) * sigmoid(o), but the
 		# modified LSTM in the "Show and Tell" paper has no biases and outputs
 		# new_c * sigmoid(o).
-		lstm_cell = tf.contrib.rnn.BasicLSTMCell(self.config.num_lstm_units)
-#		if self.mode == "train" or self.mode == 'free':
-#			lstm_cell = tf.contrib.rnn.DropoutWrapper(
-#					lstm_cell,
-#					input_keep_prob=self.config.lstm_dropout_keep_prob,
-#					output_keep_prob=self.config.lstm_dropout_keep_prob)
+		lstm_cell = tf.contrib.rnn.BasicLSTMCell(config.num_lstm_units)
+		if self.mode == "train" or self.mode == 'free':
+			lstm_cell = tf.contrib.rnn.DropoutWrapper(
+					lstm_cell,
+					input_keep_prob=config.lstm_dropout_keep_prob,
+					output_keep_prob=config.lstm_dropout_keep_prob)
 
 		# Feed the image embeddings to set the initial LSTM state.
 		zero_state = lstm_cell.zero_state(
@@ -278,10 +280,33 @@ class ShowAndTellModel(object):
 				cell_output, cell_state, logits, word, seq_embedding = \
 							self.free_run_step( lstm_cell, seq_embedding, cell_state ) 
 				cell_outputs.append( cell_output )
+				cell_states.append( cell_state )
 				free_sentence.append( word )
+			end_id_tile = tf.ones( [batch_size], tf.int64 )*self.vocab.end_id
+			free_sentence.append( end_id_tile ) # append vocab.end_id for safety
+
 			lstm_outputs = tf.stack( cell_outputs, axis=1 )
 			free_sentence = tf.stack( free_sentence, axis=1 )
-			lstm_final_state = cell_state
+			cell_states = tf.stack( cell_states, axis=2 )
+
+			# find </S>
+			eos_indices = tf.where( tf.equal( free_sentence, self.vocab.end_id ) )
+			eos_first_idx = tf.segment_min( eos_indices[:,1], eos_indices[:,0])
+			batch_range = tf.constant(np.array(range(batch_size)),dtype=tf.int64 )
+			eos_coords = tf.stack( [batch_range, eos_first_idx], axis=1 )
+
+			# collect final states
+			lstm_final_cell = tf.gather_nd( cell_states[0], eos_coords )
+			lstm_final_hidden = tf.gather_nd( cell_states[1], eos_coords )
+
+			# set zeros on lstm_outputs and free_sentence after </S> through mask
+			length_range = tf.constant( 
+					np.tile(np.array(range(nSteps)),(batch_size,1)),dtype=tf.int64 )
+			mask = tf.less( length_range, tf.expand_dims(eos_first_idx,1) )
+			free_sentence = free_sentence[:,:-1] # strip appended vocab.end_id
+			masked_free_sentence = tf.where( mask, free_sentence, tf.zeros_like(free_sentence) )
+			mask = tf.tile( tf.expand_dims( mask, 2), [1,1,config.embedding_size] )
+			masked_lstm_outputs = tf.where( mask, lstm_outputs, tf.zeros_like(lstm_outputs) )
 		else:
 			# Run the batch of sequence embeddings through the LSTM.
 			# teacher
@@ -295,6 +320,7 @@ class ShowAndTellModel(object):
 													initial_state=initial_state,
 													dtype=tf.float32,
 													scope=lstm_scope)
+				[lstm_final_cell, lstm_final_hidden] = lstm_final_state
 		# Stack batches vertically.
 		lstm_outputs_reshaped = tf.reshape(lstm_outputs, [-1, lstm_cell.output_size])
 
@@ -302,7 +328,7 @@ class ShowAndTellModel(object):
 			if self.reuse: logits_scope.reuse_variables()
 			logits = tf.contrib.layers.fully_connected(
 					inputs=lstm_outputs_reshaped,
-					num_outputs=self.config.vocab_size,
+					num_outputs=config.vocab_size,
 					activation_fn=None,
 					weights_initializer=self.initializer,
 					scope=logits_scope)
@@ -310,10 +336,12 @@ class ShowAndTellModel(object):
 		if self.mode == "inference":
 			self.inference_softmax = tf.nn.softmax(logits, name="softmax")
 		elif self.mode == "free":
-			self.lstm_outputs = lstm_outputs
-			self.lstm_final_state = lstm_final_state
-			self.behavior = [lstm_outputs, lstm_final_state]
-			self.free_sentence = free_sentence
+			self.seq_lengths = eos_first_idx
+			self.lstm_outputs = masked_lstm_outputs
+			self.lstm_final_cell = lstm_final_cell
+			self.lstm_final_hidden = lstm_final_hidden
+			self.behavior = [lstm_outputs, lstm_final_cell, lstm_final_hidden]
+			self.free_sentence = masked_free_sentence
 			# Compute losses.
 			targets = tf.reshape(self.target_seqs, [-1])
 			weights = tf.to_float(tf.reshape(self.input_mask, [-1]))
@@ -343,11 +371,14 @@ class ShowAndTellModel(object):
 				tf.summary.histogram("parameters/" + var.op.name, var)
 
 			self.total_loss = total_loss
+			self.seq_output = tf.reshape( tf.argmax(logits,1),[batch_size,-1] )
 			self.target_cross_entropy_losses = losses	# Used in evaluation.
 			self.target_cross_entropy_loss_weights = weights	# Used in evaluation.
-			self.behavior = [lstm_outputs, lstm_final_state]
+			self.behavior = [lstm_outputs, lstm_final_cell, lstm_final_hidden]
+			self.seq_lengths = sequence_length
 			self.lstm_outputs = lstm_outputs
-			self.lstm_final_state = lstm_final_state
+			self.lstm_final_cell = lstm_final_cell
+			self.lstm_final_hidden = lstm_final_hidden
 
 	def setup_inception_initializer(self):
 		"""Sets up the function to restore inception variables from checkpoint."""
