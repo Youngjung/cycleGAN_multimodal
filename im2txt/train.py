@@ -178,38 +178,7 @@ def main(unused_argv):
 
 		train_op_disc_teacher = tf.train.AdamOptimizer(0.0002,beta1=0.5).minimize( d_loss_teacher, var_list=d_vars )
 		train_op_disc_free = tf.train.AdamOptimizer(0.0002,beta1=0.5).minimize( d_loss_free, var_list=d_vars )
-		train_op_gen = tf.train.AdamOptimizer(0.0002,beta1=0.5).minimize( g_loss, var_list=g_vars )
-#		train_op_disc_teacher = tf.contrib.layers.optimize_loss(
-#											loss = d_loss_teacher,
-#											global_step = global_step,
-#											learning_rate = learning_rate,
-#											optimizer = training_config.optimizer,
-#											clip_gradients = training_config.clip_gradients,
-#											learning_rate_decay_fn = learning_rate_decay_fn,
-#											variables = d_vars,
-#											name='optimize_disc_loss' )
-#
-#		train_op_disc_free = tf.contrib.layers.optimize_loss(
-#											loss = d_loss_free,
-#											global_step = global_step,
-#											learning_rate = learning_rate,
-#											optimizer = training_config.optimizer,
-#											clip_gradients = training_config.clip_gradients,
-#											learning_rate_decay_fn = learning_rate_decay_fn,
-#											variables = d_vars,
-#											name='optimize_disc_loss' )
-#
-#		train_op_gen = tf.contrib.layers.optimize_loss(
-#											loss = g_and_NLL_loss,
-#											global_step=global_step,
-#											learning_rate=learning_rate,
-#											optimizer='Adam',
-#											clip_gradients=training_config.clip_gradients,
-#											learning_rate_decay_fn=learning_rate_decay_fn,
-#											variables = g_vars,
-#											name='optimize_gen_loss' )
-
-
+		train_op_gen = tf.train.AdamOptimizer(0.0002,beta1=0.5).minimize( g_and_NLL_loss, var_list=g_vars )
 
 		# Set up the Saver for saving and restoring model checkpoints.
 		saver = tf.train.Saver(max_to_keep=training_config.max_checkpoints_to_keep)
@@ -325,20 +294,20 @@ def main(unused_argv):
 
    							# train generator
    							# val_g_acc is temporarily named variable instead of val_d_acc
-#							_, val_g_loss, val_NLL_loss, val_g_acc, summary_str, \
-#							val_free_sentence, val_teacher_sentence \
-#							= sess.run( 
-#								[train_op_gen,g_loss,NLL_loss, d_errFree, summary['g_and_NLL_loss'],
-#								free_sentence, teacher_sentence], 
-#									feed_dict=generator_feed_dict )
-#							summaryWriter.add_summary(summary_str, counter)
-#							_, val_g_loss, val_NLL_loss, val_g_acc, summary_str, \
-#							val_free_sentence, val_teacher_sentence \
-#							= sess.run( 
-#								[train_op_gen,g_loss,NLL_loss, d_errFree, summary['g_and_NLL_loss'],
-#								free_sentence, teacher_sentence], 
-#									feed_dict=generator_feed_dict )
-#							summaryWriter.add_summary(summary_str, counter)
+							_, val_g_loss, val_NLL_loss, val_g_acc, summary_str, \
+							val_free_sentence, val_teacher_sentence \
+							= sess.run( 
+								[train_op_gen,g_loss,NLL_loss, d_errFree, summary['g_and_NLL_loss'],
+								free_sentence, teacher_sentence], 
+									feed_dict=generator_feed_dict )
+							summaryWriter.add_summary(summary_str, counter)
+							_, val_g_loss, val_NLL_loss, val_g_acc, summary_str, \
+							val_free_sentence, val_teacher_sentence \
+							= sess.run( 
+								[train_op_gen,g_loss,NLL_loss, d_errFree, summary['g_and_NLL_loss'],
+								free_sentence, teacher_sentence], 
+									feed_dict=generator_feed_dict )
+							summaryWriter.add_summary(summary_str, counter)
 			
 						if counter % FLAGS.log_every_n_steps==0:
 							elapsed = time.time() - start_time
@@ -384,7 +353,7 @@ def main(unused_argv):
 								sentence = "  GT %d) %s" % (i+1, sentence)
 								print( sentence )
 								f_valid_text.write( sentence +'\n' )
-								fname = 'image{}.png'.format(i)
+								fname = 'image{}.png'.format(i+1)
 								scipy.misc.imsave(fname, images[i])
 							f_valid_text.flush()
 			
@@ -423,9 +392,10 @@ def log( epoch, batch, nBatches, lossnames, losses, elapsed, counter=None, filel
 	m,s = divmod( elapsed, 60 )
 	h,m = divmod( m,60 )
 	timestamp = "{:2}:{:02}:{:02}".format( int(h),int(m),int(s) )
-	log = "{} e:b={}:{:>{}}/{} {})".format( timestamp, epoch, batch, nDigits, nBatches, str_buffer )
+#	log = "{} e:b={}:{:>{}}/{} {})".format( timestamp, epoch, batch, nDigits, nBatches, str_buffer )
+	log = "t{} e:b={}:{}/{} {})".format( timestamp, epoch, batch, nBatches, str_buffer )
 	if counter is not None:
-		log = "{:>5}".format(counter) + log
+		log = "c{} ".format(counter) + log
 	print( log )
 	if filelogger:
 		filelogger.write( log )
