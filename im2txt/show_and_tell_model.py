@@ -423,9 +423,9 @@ class ShowAndTellModel(object):
 			self.input_mask = existing_inputs
 
 		self.build_image_embeddings()
+		self.build_seq_embeddings()
 
 		with tf.variable_scope('generator') as scope_generator:
-			self.build_seq_embeddings()
 			self.build_model()
 		self.setup_inception_initializer()
 		self.setup_global_step()

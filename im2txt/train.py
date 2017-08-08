@@ -163,7 +163,9 @@ def main(unused_argv):
 		vars_all = [ v for v in tf.trainable_variables() \
 								 if v not in im2txt_generator.inception_variables ]
 		d_vars = [ v for v in vars_all if 'discr' in v.name ]
-		g_vars = [ v for v in vars_all if 'discr' not in v.name ]
+		im2txt_vars = [ v for v in vars_all if 'discr' not in v.name ]
+		g_vars = [ v for v in vars_all if 'generator' in v.name ]
+		
 
 		# Set up the training ops.
 		train_op_NLL = tf.contrib.layers.optimize_loss(
@@ -173,7 +175,7 @@ def main(unused_argv):
 											optimizer = training_config.optimizer,
 											clip_gradients = training_config.clip_gradients,
 											learning_rate_decay_fn = learning_rate_decay_fn,
-											variables = g_vars,
+											variables = im2txt_vars,
 											name='optimize_NLL_loss' )
 
 		train_op_disc_teacher = tf.train.AdamOptimizer(0.0002,beta1=0.5).minimize( d_loss_teacher, var_list=d_vars )
